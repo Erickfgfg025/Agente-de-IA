@@ -2,9 +2,9 @@ name: Keep Documento Pronto responsive
 
 on:
   schedule:
-    # Render free web services can sleep after 15 minutes without inbound traffic.
-    # A 10-minute health check helps reduce cold starts.
-    - cron: "*/10 * * * *"
+    # Run every 5 minutes, offset from the top of the hour to reduce queue delays.
+    # This is best-effort only; GitHub Actions schedules are not guaranteed.
+    - cron: "2-57/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,7 @@ permissions:
 jobs:
   healthcheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
       - name: Ping Render health endpoint
         env:
@@ -21,7 +21,7 @@ jobs:
         run: |
           set -eu
           for attempt in 1 2 3; do
-            status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' --max-time 90 "$HEALTH_URL" || true)"
+            status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' --max-time 45 "$HEALTH_URL" || true)"
             cat /tmp/health.json 2>/dev/null || true
             if [ "$status" = "200" ]; then
               echo "Health check passed."
