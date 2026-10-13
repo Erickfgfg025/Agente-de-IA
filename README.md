@@ -1,62 +1,34 @@
 # DOCUMENTO PRONTO 📄
 
-Bot de Telegram para criar, converter, organizar e editar documentos e arquivos. Projeto modular, com foco inicial em conversões de documentos e ferramentas de PDF.
+Bot de Telegram para criar, converter e organizar documentos. O projeto usa Python, aiogram, Supabase, PyMuPDF, pypdf, openpyxl, python-pptx, pdfplumber, Tesseract OCR e LibreOffice.
 
-## Estado atual
-- [x] Projeto Supabase criado na região de São Paulo.
-- [x] Esquema inicial do banco aplicado.
-- [x] Esqueleto do bot Telegram iniciado.
-- [x] Servidor webhook compatível com Render e endpoint de saúde.
-- [x] Blueprint inicial de deploy em `render.yaml`.
-- [ ] Renomear o repositório GitHub para `Documento-Pronto`.
-- [ ] Criar o serviço no Render e configurar os segredos.
-- [ ] Implementar conversores e testes funcionais.
-- [ ] Configurar monitoramento e alertas.
+## Funcionalidades
 
-## Funcionalidades planejadas
-1. Conversões de documentos (DOCX, TXT, ODT, RTF e PDF, conforme compatibilidade).
-2. Ferramentas de PDF: juntar, dividir, girar, reordenar e extrair texto.
-3. Planilhas e apresentações.
-4. OCR para imagens e PDFs digitalizados.
-5. Edição assistida, resumo e tradução como módulos opcionais.
-6. Limites Free/Premium, medição de uso e limpeza automática de arquivos temporários.
+- Criar documentos Word e PDF a partir de texto.
+- Converter PDF em TXT, Word, Excel, PowerPoint ou JPG.
+- Converter TXT e imagens para PDF/Word quando compatível.
+- Converter Excel (.xlsx) e PowerPoint (.pptx) para PDF.
+- Juntar PDFs, dividir páginas e extrair texto selecionável.
+- Aplicar OCR em PDFs digitalizados e produzir PDF pesquisável.
+- Otimizar PDFs e reordenar, girar ou remover páginas.
+- Consultar cota diária com /uso.
 
-> A conversão depende do formato de origem e destino. Alguns layouts, fontes, tabelas ou recursos podem sofrer alterações. O bot deverá informar quando uma conversão não for suportada ou puder perder formatação.
+## Observações
 
-## Stack inicial
-- Python 3.11+
-- aiogram 3
-- aiohttp para o webhook do Telegram
-- Supabase/PostgreSQL para metadados e uso
-- LibreOffice headless, PyMuPDF/pypdf, python-docx e Pillow conforme cada conversor
+- PDF para Excel depende de texto e tabelas detectáveis. PDF digitalizado deve passar pelo OCR antes da extração.
+- PDF para PowerPoint cria um slide por página como imagem. O visual é preservado, mas texto e elementos não ficam editáveis.
+- Excel/PowerPoint para PDF dependem do LibreOffice e das fontes disponíveis; layouts complexos podem mudar.
+- OCR aceita até 30 páginas por operação; PDF para JPG e PDF para PowerPoint aceitam até 100 páginas.
+- Arquivos são processados com buffers e arquivos temporários; não publique documentos de usuários no repositório.
 
 ## Deploy no Render
-O arquivo `render.yaml` define um serviço Web gratuito e usa webhook do Telegram para que as atualizações recebidas possam acordar o serviço após suspensão. O plano gratuito pode suspender o serviço após um período sem tráfego; portanto, não há garantia de resposta instantânea ou disponibilidade contínua.
 
-1. Abra o Render e escolha **New + → Blueprint**.
-2. Conecte o repositório GitHub deste projeto e selecione `render.yaml`.
-3. Informe `TELEGRAM_BOT_TOKEN` e `SUPABASE_SERVICE_ROLE_KEY` quando solicitado.
-4. `SUPABASE_URL` já está definida no blueprint; `WEBHOOK_SECRET_TOKEN` será gerado pelo Render.
-5. Depois do deploy, confira o endpoint `/healthz` e teste `/start` no Telegram.
+O runtime Docker instala LibreOffice, Tesseract OCR com idiomas português/inglês e as dependências Python. Configure TELEGRAM_BOT_TOKEN e SUPABASE_SERVICE_ROLE_KEY como segredos no Render. Confira o endpoint /healthz após o deploy.
 
-Não publique nem compartilhe tokens ou chaves. A chave `service_role` deve existir somente nas variáveis privadas do ambiente do servidor.
+Se o Blueprint atual ainda estiver configurado como Python nativo, sincronize as alterações de render.yaml e confirme que o runtime do serviço foi alterado para Docker antes de validar OCR e conversões Office. O plano gratuito do Render pode suspender o serviço após inatividade, sem garantia de resposta instantânea ou disponibilidade contínua.
 
 ## Desenvolvimento local
-1. Instale Python 3.11 ou superior.
-2. Crie e ative um ambiente virtual.
-3. Instale as dependências: `pip install -r requirements.txt`.
-4. Copie `.env.example` para `.env` e preencha as variáveis.
-5. Para execução local com long polling, execute: `python -m bot.main`.
 
-Nunca envie tokens, chaves privadas ou arquivos de usuários para o GitHub. Não armazene o conteúdo de arquivos no banco; guarde apenas metadados necessários e remova arquivos temporários após o prazo definido.
+Instale Python 3.11+, as dependências de requirements.txt, LibreOffice e Tesseract com idiomas português e inglês. Configure as variáveis de ambiente e execute o módulo bot.main para long polling ou bot.web para webhook.
 
-## Banco de dados
-A primeira migração está em `supabase/migrations/20261013000000_initial_documento_pronto_schema.sql`. Ela documenta o esquema inicial já aplicado ao projeto Supabase.
-
-## Segurança
-- Validar MIME e assinatura real do arquivo, não apenas a extensão.
-- Limitar tamanho, duração e frequência dos trabalhos.
-- Não executar macros nem conteúdo enviado por usuários.
-- Extrair arquivos compactados com proteção contra path traversal e bombas de descompactação.
-- Manter RLS habilitado e acessar o banco pelo backend confiável.
-- Não expor a chave `service_role` no bot distribuído, em mensagens ou no repositório.
+Não publique tokens, chaves privadas ou arquivos pessoais no GitHub.

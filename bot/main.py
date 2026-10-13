@@ -16,7 +16,10 @@ from bot.config import settings
 from bot.database import consume_daily_usage, get_daily_usage, register_telegram_user
 from bot.documents import make_docx, make_pdf, safe_filename
 from bot.conversions import SUPPORTED_INPUTS, available_outputs, convert_file
-from bot.pdf_tools import extract_pdf_text, merge_pdfs, split_pdf_zip
+from bot.pdf_tools import (
+    compress_pdf, extract_pdf_text, merge_pdfs, ocr_pdf, organize_pdf,
+    pdf_page_count, split_pdf_zip,
+)
 from bot.keyboards import main_menu
 
 
@@ -64,7 +67,6 @@ async def send_usage(telegram_user_id: int, reply_target) -> None:
         await reply_target.answer("Não consegui consultar seu uso agora. Tente novamente em instantes.")
 
 
-
 class CreateDocument(StatesGroup):
     waiting_text = State()
     waiting_format = State()
@@ -72,6 +74,7 @@ class CreateDocument(StatesGroup):
     waiting_conversion = State()
     waiting_pdf_file = State()
     waiting_merge_files = State()
+    waiting_organize_command = State()
 
 
 def format_menu() -> InlineKeyboardMarkup:
@@ -93,7 +96,9 @@ async def start(message: Message, state: FSMContext) -> None:
 
     await message.answer(
         "📄 <b>DOCUMENTO PRONTO</b>\n\n"
-        "Seu espaço para criar, converter, organizar e trabalhar com arquivos.\n\n"
+        "Seu espaço para criar, converter e organizar documentos.\n\n"
+        "Converta PDF, Excel, PowerPoint e imagens, extraia texto com OCR "
+        "e compacte, reordene, gire ou remova páginas de PDFs.\n\n"
         "Escolha uma opção no menu abaixo.",
         reply_markup=main_menu(),
         parse_mode="HTML",
@@ -109,8 +114,9 @@ async def usage_command(message: Message) -> None:
 @dp.message(Command("ajuda", "help"))
 async def help_command(message: Message) -> None:
     await message.answer(
-        "Use o menu para criar um documento. Para começar novamente, envie /start. "
-        "Não envie senhas nem documentos de terceiros sem autorização."
+        "Use o menu para criar ou converter documentos e abrir as ferramentas de PDF. "
+        "Para cancelar uma operação, envie /cancelar. Conversões de PDF podem alterar tabelas "
+        "ou formatação; PDF para PowerPoint cria slides como imagens."
     )
 
 
@@ -120,13 +126,14 @@ async def cancel_command(message: Message, state: FSMContext) -> None:
     await message.answer("Operação cancelada. Use o menu para escolher outra ferramenta.", reply_markup=main_menu())
 
 
-
-
 def conversion_menu(outputs: list[str]) -> InlineKeyboardMarkup:
     labels = {
         "pdf": "📕 PDF",
         "docx": "📄 Word (.docx)",
         "txt": "📝 Texto (.txt)",
+        "xlsx": "📊 Excel (.xlsx)",
+        "pptx": "📽️ PowerPoint (.pptx)",
+        "jpg": "🖼️ JPG (ZIP se houver várias páginas)",
     }
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=labels[item], callback_data=f"convert:{item}")]
@@ -140,8 +147,8 @@ async def conversion_command(message: Message, state: FSMContext) -> None:
     await state.set_state(CreateDocument.waiting_file)
     await message.answer(
         "🔄 <b>Conversor de arquivos</b>\n\n"
-        "Envie um arquivo PDF, Word (.docx), TXT ou uma imagem PNG/JPG/WEBP.\n"
-        "Tamanho máximo: " + str(settings.max_upload_mb) + " MB.\n"
+        "Envie um PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), TXT ou imagem PNG/JPG/WEBP.\n"
+        f"Tamanho máximo: {settings.max_upload_mb} MB.\n"
         "Para cancelar, envie /cancelar.",
         parse_mode="HTML",
     )
@@ -154,8 +161,9 @@ async def begin_conversion(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message:
         await callback.message.answer(
             "🔄 <b>Converter arquivo</b>\n\n"
-            "Envie um arquivo PDF, Word (.docx), TXT ou uma imagem PNG/JPG/WEBP.\n"
+            "Envie um PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), TXT ou imagem PNG/JPG/WEBP.\n"
             f"Tamanho máximo: {settings.max_upload_mb} MB.\n"
+            "PDF para PowerPoint gera slides como imagens; a extração de tabelas depende da qualidade do PDF.\n"
             "Para cancelar, envie /cancelar.",
             parse_mode="HTML",
         )
@@ -170,16 +178,14 @@ async def receive_conversion_file(message: Message, state: FSMContext) -> None:
         uploaded_photo = message.photo[-1]
         filename = "imagem.jpg"
         file_id = uploaded_photo.file_id
-
     if not file_id:
         await message.answer("Envie o arquivo como anexo, ou uma imagem. Para sair, use /cancelar.")
         return
 
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_INPUTS:
-        await message.answer("Formato não suportado. Envie PDF, DOCX, TXT, PNG, JPG, JPEG ou WEBP.")
+        await message.answer("Formato não suportado. Envie PDF, DOCX, XLSX, PPTX, TXT, PNG, JPG, JPEG ou WEBP.")
         return
-
     size = uploaded.file_size if uploaded else (message.photo[-1].file_size if message.photo else 0)
     if size and size > settings.max_upload_mb * 1024 * 1024:
         await message.answer(f"O arquivo excede o limite de {settings.max_upload_mb} MB.")
@@ -198,7 +204,6 @@ async def receive_conversion_file(message: Message, state: FSMContext) -> None:
     if not outputs:
         await message.answer("Ainda não existe conversão disponível para esse formato.")
         return
-
     await state.update_data(conversion_data=data, conversion_filename=filename)
     await state.set_state(CreateDocument.waiting_conversion)
     await message.answer(
@@ -217,11 +222,9 @@ async def run_conversion(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message:
             await callback.message.answer("Operação cancelada.", reply_markup=main_menu())
         return
-
     if await state.get_state() != CreateDocument.waiting_conversion.state:
         await callback.answer("Envie um arquivo pelo menu Converter arquivo primeiro.", show_alert=True)
         return
-
     data = await state.get_data()
     file_data = data.get("conversion_data")
     filename = data.get("conversion_filename", "arquivo")
@@ -229,7 +232,9 @@ async def run_conversion(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         await callback.answer("O arquivo expirou. Envie-o novamente.", show_alert=True)
         return
-
+    if not callback.message:
+        await callback.answer("Não encontrei a mensagem da operação.")
+        return
     if not await consume_quota(callback.from_user.id, callback.message):
         await state.clear()
         await callback.answer()
@@ -238,17 +243,21 @@ async def run_conversion(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Convertendo arquivo…")
     try:
         content, output_name, mime_type = await asyncio.to_thread(convert_file, file_data, filename, action)
-        if callback.message:
-            await callback.message.answer_document(
-                BufferedInputFile(content, filename=output_name),
-                caption=f"✅ Conversão concluída: {output_name}",
-            )
-            await callback.message.answer("Arquivo convertido. O que deseja fazer agora?", reply_markup=main_menu())
+        await callback.message.answer_document(
+            BufferedInputFile(content, filename=output_name),
+            caption=f"✅ Conversão concluída: {output_name}",
+        )
+        if action == "pptx" and Path(filename).suffix.lower() == ".pdf":
+            await callback.message.answer("ℹ️ Cada página do PDF virou uma imagem em um slide. O texto e os elementos não ficam editáveis.")
+        elif action == "xlsx" and Path(filename).suffix.lower() == ".pdf":
+            await callback.message.answer("ℹ️ Tabelas são extraídas quando detectadas. PDF sem tabela pode virar linhas de texto no Excel.")
+        elif action == "pdf" and Path(filename).suffix.lower() in {".xlsx", ".pptx"}:
+            await callback.message.answer("ℹ️ A formatação depende do arquivo original e das fontes disponíveis no servidor.")
+        await callback.message.answer("Arquivo convertido. O que deseja fazer agora?", reply_markup=main_menu())
     except Exception as exc:
         logger.exception("File conversion failed for %s to %s", filename, action)
         detail = str(exc) if isinstance(exc, ValueError) else "O arquivo pode estar danificado ou usar recursos não compatíveis."
-        if callback.message:
-            await callback.message.answer(f"Não consegui converter esse arquivo. {detail}")
+        await callback.message.answer(f"Não consegui converter esse arquivo. {detail}")
     finally:
         await state.clear()
 
@@ -292,18 +301,18 @@ async def generate_document(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message:
             await callback.message.answer("Operação cancelada.", reply_markup=main_menu())
         return
-
     if await state.get_state() != CreateDocument.waiting_format.state:
         await callback.answer("Comece em Criar ou editar documento.", show_alert=True)
         return
-
     data = await state.get_data()
     text = data.get("document_text", "")
     if not text:
         await state.clear()
         await callback.answer("O texto não foi encontrado. Comece novamente.", show_alert=True)
         return
-
+    if not callback.message:
+        await callback.answer("Não encontrei a mensagem da operação.")
+        return
     if not await consume_quota(callback.from_user.id, callback.message):
         await state.clear()
         await callback.answer()
@@ -321,26 +330,26 @@ async def generate_document(callback: CallbackQuery, state: FSMContext) -> None:
             document = BufferedInputFile(content, filename=f"{filename}.pdf")
         else:
             return
-        if callback.message:
-            await callback.message.answer_document(
-                document,
-                caption=f"✅ Documento criado em {'.docx' if action == 'docx' else '.pdf'}",
-            )
-            await callback.message.answer("Quer fazer outra coisa?", reply_markup=main_menu())
+        await callback.message.answer_document(
+            document,
+            caption=f"✅ Documento criado em {'.docx' if action == 'docx' else '.pdf'}",
+        )
+        await callback.message.answer("Quer fazer outra coisa?", reply_markup=main_menu())
     except Exception:
         logger.exception("Document generation failed")
-        if callback.message:
-            await callback.message.answer("Não consegui gerar o arquivo desta vez. Tente novamente com um texto mais simples.")
+        await callback.message.answer("Não consegui gerar o arquivo desta vez. Tente novamente com um texto mais simples.")
     finally:
         await state.clear()
-
 
 
 def pdf_tools_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📎 Juntar PDFs", callback_data="pdf:merge")],
         [InlineKeyboardButton(text="✂️ Dividir PDF por página", callback_data="pdf:split")],
-        [InlineKeyboardButton(text="📝 Extrair texto do PDF", callback_data="pdf:extract")],
+        [InlineKeyboardButton(text="📝 Extrair texto selecionável", callback_data="pdf:extract")],
+        [InlineKeyboardButton(text="🔎 OCR: PDF digitalizado", callback_data="pdf:ocr")],
+        [InlineKeyboardButton(text="🗜️ Comprimir PDF", callback_data="pdf:compress")],
+        [InlineKeyboardButton(text="🗂️ Organizar páginas", callback_data="pdf:organize")],
         [InlineKeyboardButton(text="⬅️ Menu principal", callback_data="pdf:back")],
     ])
 
@@ -348,6 +357,15 @@ def pdf_tools_menu() -> InlineKeyboardMarkup:
 def merge_control_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Juntar arquivos enviados", callback_data="pdf:merge_finish")],
+        [InlineKeyboardButton(text="❌ Cancelar", callback_data="pdf:cancel")],
+    ])
+
+
+def organize_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↕️ Reordenar páginas", callback_data="org:order")],
+        [InlineKeyboardButton(text="🔄 Girar páginas", callback_data="org:rotate")],
+        [InlineKeyboardButton(text="🗑️ Remover páginas", callback_data="org:remove")],
         [InlineKeyboardButton(text="❌ Cancelar", callback_data="pdf:cancel")],
     ])
 
@@ -370,13 +388,19 @@ async def pdf_tools_action(callback: CallbackQuery, state: FSMContext) -> None:
                 "📎 <b>Juntar PDFs</b>\nEnvie pelo menos 2 arquivos PDF, um por vez. Máximo: 10 arquivos. Quando terminar, toque em “Juntar arquivos enviados”.",
                 parse_mode="HTML", reply_markup=merge_control_menu())
         return
-    if action in {"split", "extract"}:
+    if action in {"split", "extract", "ocr", "compress", "organize"}:
         await state.clear()
         await state.update_data(pdf_action=action)
         await state.set_state(CreateDocument.waiting_pdf_file)
-        prompt = "✂️ Envie o PDF que deseja dividir em arquivos de uma página." if action == "split" else "📝 Envie o PDF do qual deseja extrair o texto selecionável."
+        prompts = {
+            "split": "✂️ Envie o PDF que deseja dividir em arquivos de uma página.",
+            "extract": "📝 Envie o PDF do qual deseja extrair texto selecionável.",
+            "ocr": "🔎 Envie o PDF digitalizado. O OCR criará um PDF pesquisável em português e inglês. Limite: 30 páginas.",
+            "compress": "🗜️ Envie o PDF que deseja otimizar. A economia de espaço depende do conteúdo.",
+            "organize": "🗂️ Envie o PDF cujas páginas deseja reordenar, girar ou remover.",
+        }
         if callback.message:
-            await callback.message.answer(prompt)
+            await callback.message.answer(prompts[action])
         return
     if action == "merge_finish":
         if await state.get_state() != CreateDocument.waiting_merge_files.state:
@@ -384,23 +408,21 @@ async def pdf_tools_action(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.message.answer("Inicie a operação pelo menu Ferramentas de PDF.")
             return
         data = await state.get_data()
-        files = data.get("merge_files", [])
-        if len(files) < 2:
+        files_to_merge = data.get("merge_files", [])
+        if len(files_to_merge) < 2:
             if callback.message:
                 await callback.message.answer("Envie pelo menos 2 PDFs antes de juntar.", reply_markup=merge_control_menu())
             return
-        if not await consume_quota(callback.from_user.id, callback.message):
+        if not callback.message or not await consume_quota(callback.from_user.id, callback.message):
             await state.clear()
             return
         try:
-            result = await asyncio.to_thread(merge_pdfs, files)
-            if callback.message:
-                await callback.message.answer_document(BufferedInputFile(result, filename="pdfs_unidos.pdf"), caption="✅ PDFs unidos com sucesso.")
-                await callback.message.answer("O que deseja fazer agora?", reply_markup=main_menu())
+            result = await asyncio.to_thread(merge_pdfs, files_to_merge)
+            await callback.message.answer_document(BufferedInputFile(result, filename="pdfs_unidos.pdf"), caption="✅ PDFs unidos com sucesso.")
+            await callback.message.answer("O que deseja fazer agora?", reply_markup=main_menu())
         except Exception as exc:
             logger.exception("Erro ao juntar PDFs")
-            if callback.message:
-                await callback.message.answer(f"Não foi possível juntar os PDFs: {exc}")
+            await callback.message.answer(f"Não foi possível juntar os PDFs: {exc}")
         finally:
             await state.clear()
 
@@ -415,8 +437,8 @@ async def receive_merge_pdf(message: Message, state: FSMContext) -> None:
         await message.answer(f"Arquivo acima do limite de {settings.max_upload_mb} MB.")
         return
     data = await state.get_data()
-    files = data.get("merge_files", [])
-    if len(files) >= 10:
+    files_to_merge = data.get("merge_files", [])
+    if len(files_to_merge) >= 10:
         await message.answer("Limite de 10 PDFs por operação atingido.", reply_markup=merge_control_menu())
         return
     buf = BytesIO()
@@ -426,9 +448,13 @@ async def receive_merge_pdf(message: Message, state: FSMContext) -> None:
         logger.exception("Falha ao baixar PDF para junção")
         await message.answer("Não consegui baixar esse PDF do Telegram. Tente enviá-lo novamente.")
         return
-    files.append((doc.file_name or f"arquivo_{len(files)+1}.pdf", buf.getvalue()))
-    await state.update_data(merge_files=files)
-    await message.answer(f"PDF recebido ({len(files)}/10). " + ("Envie mais PDFs ou finalize." if len(files) >= 2 else "Envie pelo menos mais um PDF."), reply_markup=merge_control_menu())
+    files_to_merge.append((doc.file_name or f"arquivo_{len(files_to_merge)+1}.pdf", buf.getvalue()))
+    await state.update_data(merge_files=files_to_merge)
+    await message.answer(
+        f"PDF recebido ({len(files_to_merge)}/10). " +
+        ("Envie mais PDFs ou finalize." if len(files_to_merge) >= 2 else "Envie pelo menos mais um PDF."),
+        reply_markup=merge_control_menu(),
+    )
 
 
 @dp.message(CreateDocument.waiting_pdf_file)
@@ -442,31 +468,115 @@ async def receive_single_pdf_tool(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     action = data.get("pdf_action")
-    if action not in {"extract", "split"}:
+    if action not in {"extract", "split", "ocr", "compress", "organize"}:
         await state.clear()
         await message.answer("Operação inválida. Abra novamente Ferramentas de PDF.")
         return
-    if not message.from_user or not await consume_quota(message.from_user.id, message):
-        await state.clear()
+    if not message.from_user:
+        await message.answer("Não consegui identificar o usuário desta operação.")
         return
+
     buf = BytesIO()
     try:
         await message.bot.download(doc.file_id, destination=buf)
         raw = buf.getvalue()
+        pages = await asyncio.to_thread(pdf_page_count, raw)
+        if action == "organize":
+            await state.update_data(organization_data=raw, organization_filename=doc.file_name or "documento.pdf")
+            await state.set_state(CreateDocument.waiting_organize_command)
+            await message.answer(f"🗂️ O PDF tem {pages} página(s). O que deseja fazer?", reply_markup=organize_menu())
+            return
+        if not await consume_quota(message.from_user.id, message):
+            await state.clear()
+            return
+
         if action == "extract":
             result = await asyncio.to_thread(extract_pdf_text, raw)
             filename = "texto_extraido.txt"
+            caption = "✅ Texto extraído."
         elif action == "split":
             result = await asyncio.to_thread(split_pdf_zip, raw, doc.file_name or "documento.pdf")
             filename = "pdf_dividido.zip"
+            caption = "✅ PDF dividido por página."
+        elif action == "ocr":
+            result = await asyncio.to_thread(ocr_pdf, raw)
+            filename = "documento_com_ocr.pdf"
+            caption = "✅ PDF pesquisável criado com OCR."
+        elif action == "compress":
+            result = await asyncio.to_thread(compress_pdf, raw)
+            filename = "pdf_comprimido.pdf"
+            reduction = (1 - len(result) / max(1, len(raw))) * 100
+            caption = f"✅ PDF otimizado. Redução aproximada: {reduction:.1f}%." if reduction > 0 else "✅ PDF otimizado. O tamanho não diminuiu neste arquivo."
         else:
-            await message.answer("Operação inválida. Abra novamente Ferramentas de PDF.")
-            return
-        await message.answer_document(BufferedInputFile(result, filename=filename), caption="✅ PDF processado com sucesso.")
+            raise ValueError("Operação PDF inválida.")
+        await message.answer_document(BufferedInputFile(result, filename=filename), caption=caption)
         await message.answer("O que deseja fazer agora?", reply_markup=main_menu())
     except Exception as exc:
         logger.exception("Erro na ferramenta PDF")
-        await message.answer(f"Não foi possível processar o PDF: {exc}")
+        detail = str(exc) if isinstance(exc, ValueError) else "Verifique se o PDF está íntegro e tente novamente."
+        await message.answer(f"Não foi possível processar o PDF: {detail}")
+    finally:
+        if action != "organize":
+            await state.clear()
+
+
+@dp.callback_query(F.data.startswith("org:"))
+async def choose_organization_action(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != CreateDocument.waiting_organize_command.state:
+        await callback.answer("Envie um PDF pelo menu Organizar páginas primeiro.", show_alert=True)
+        return
+    action = (callback.data or "").split(":", 1)[1]
+    prompts = {
+        "order": "Envie a nova ordem de TODAS as páginas separadas por vírgula. Exemplo para 3 páginas: 3,1,2.",
+        "rotate": "Envie as páginas e o ângulo de giro (90, 180 ou 270, sentido horário). Exemplo: 2,4 90.",
+        "remove": "Envie os números das páginas que deseja remover, separados por vírgula. Exemplo: 2,4.",
+    }
+    if action not in prompts:
+        await callback.answer("Ação não reconhecida.", show_alert=True)
+        return
+    await state.update_data(organize_operation=action)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(prompts[action] + "\nPara cancelar, envie /cancelar.")
+
+
+@dp.message(CreateDocument.waiting_organize_command)
+async def apply_organization(message: Message, state: FSMContext) -> None:
+    instruction = (message.text or "").strip()
+    data = await state.get_data()
+    raw = data.get("organization_data")
+    operation = data.get("organize_operation")
+    if not isinstance(raw, bytes):
+        await state.clear()
+        await message.answer("O PDF expirou. Abra Organizar páginas e envie o arquivo novamente.")
+        return
+    if operation not in {"order", "rotate", "remove"}:
+        await message.answer("Escolha primeiro reordenar, girar ou remover páginas.", reply_markup=organize_menu())
+        return
+    if not instruction:
+        await message.answer("Envie os números das páginas conforme o exemplo.")
+        return
+    if not message.from_user:
+        await state.clear()
+        await message.answer("Não consegui identificar o usuário desta operação.")
+        return
+    try:
+        result = await asyncio.to_thread(organize_pdf, raw, operation, instruction)
+        if not await consume_quota(message.from_user.id, message):
+            await state.clear()
+            return
+        filename = {
+            "order": "pdf_reordenado.pdf",
+            "rotate": "pdf_girado.pdf",
+            "remove": "pdf_sem_paginas_selecionadas.pdf",
+        }[operation]
+        labels = {"order": "Páginas reordenadas", "rotate": "Páginas giradas", "remove": "Páginas removidas"}
+        await message.answer_document(BufferedInputFile(result, filename=filename), caption=f"✅ {labels[operation]} com sucesso.")
+        await message.answer("O que deseja fazer agora?", reply_markup=main_menu())
+    except Exception as exc:
+        logger.exception("Falha ao organizar PDF")
+        detail = str(exc) if isinstance(exc, ValueError) else "Não consegui modificar este PDF."
+        await message.answer(f"Não foi possível organizar o PDF: {detail}")
     finally:
         await state.clear()
 
@@ -493,13 +603,14 @@ async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
     if action == "usage":
         if callback.message:
             await send_usage(callback.from_user.id, callback.message)
+        await callback.answer()
         return
     messages = {
-        "convert": "🔄 <b>Converter arquivo</b>\n\nO próximo módulo será a conversão de arquivos enviados. Por enquanto, a criação de Word e PDF já está disponível.",
-        "pdf": "📑 <b>Ferramentas de PDF</b>\n\nJunte vários PDFs, divida um PDF em páginas separadas ou extraia texto selecionável para TXT.",
+        "convert": "🔄 <b>Converter arquivo</b>\n\nEnvie um PDF, DOCX, XLSX, PPTX, TXT ou uma imagem.",
+        "pdf": "📑 <b>Ferramentas de PDF</b>\n\nJunte, divida, extraia texto, aplique OCR, comprima ou organize páginas de PDFs.",
         "usage": "📊 Consulte seu uso diário.",
         "premium": "⭐ Nenhuma cobrança está ativa. Os planos serão definidos depois de medir custos e uso real.",
-        "help": "Use Criar ou editar documento para gerar arquivos Word ou PDF a partir de texto. Envie /cancelar para interromper uma operação.",
+        "help": "Use Converter arquivo ou Ferramentas de PDF para começar. Envie /cancelar para interromper uma operação.",
     }
     await callback.answer()
     if callback.message:
@@ -522,7 +633,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 @dp.callback_query()

@@ -1,15 +1,13 @@
 services:
   - type: web
     name: documento-pronto
-    runtime: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m bot.web
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.11
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: SUPABASE_URL
