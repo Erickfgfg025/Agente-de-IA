@@ -1,0 +1,33 @@
+name: Keep Documento Pronto responsive
+
+on:
+  schedule:
+    # Render free web services can sleep after 15 minutes without inbound traffic.
+    # A 10-minute health check helps reduce cold starts.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping Render health endpoint
+        env:
+          HEALTH_URL: https://documento-pronto-bd9e.onrender.com/healthz
+        run: |
+          set -eu
+          for attempt in 1 2 3; do
+            status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' --max-time 90 "$HEALTH_URL" || true)"
+            cat /tmp/health.json 2>/dev/null || true
+            if [ "$status" = "200" ]; then
+              echo "Health check passed."
+              exit 0
+            fi
+            echo "Health check attempt $attempt returned HTTP ${status:-unknown}."
+            sleep 5
+          done
+          exit 1
