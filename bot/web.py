@@ -32,7 +32,7 @@ async def configure_webhook(bot: Bot) -> None:
     logger.info("Webhook do Telegram configurado.")
 
 
-async def main() -> None:
+def main() -> None:
     if not settings.telegram_bot_token:
         raise RuntimeError("Configure TELEGRAM_BOT_TOKEN nas variáveis do serviço.")
     secret = os.getenv("WEBHOOK_SECRET_TOKEN", "")
@@ -54,14 +54,9 @@ async def main() -> None:
     webhook_handler.register(app, path="/telegram/webhook")
     setup_application(app, dp, bot=bot)
 
-    try:
-        port = int(os.getenv("PORT", "10000"))
-        web.run_app(app, host="0.0.0.0", port=port)
-    finally:
-        await bot.session.close()
+    port = int(os.getenv("PORT", "10000"))
+    web.run_app(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(main())
+    main()
