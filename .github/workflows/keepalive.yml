@@ -2,10 +2,12 @@ name: Keep Documento Pronto responsive
 
 on:
   schedule:
-    # Run every 5 minutes, offset from the top of the hour to reduce queue delays.
-    # This is best-effort only; GitHub Actions schedules are not guaranteed.
-    - cron: "2-57/5 * * * *"
+    # The shortest supported GitHub Actions schedule interval is 5 minutes.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -15,19 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Ping Render health endpoint
+      - name: Wake and verify Render service
         env:
           HEALTH_URL: https://documento-pronto-bd9e.onrender.com/healthz
         run: |
           set -eu
-          for attempt in 1 2 3; do
-            status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' --max-time 45 "$HEALTH_URL" || true)"
-            cat /tmp/health.json 2>/dev/null || true
-            if [ "$status" = "200" ]; then
-              echo "Health check passed."
-              exit 0
-            fi
-            echo "Health check attempt $attempt returned HTTP ${status:-unknown}."
-            sleep 5
-          done
-          exit 1
+          status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' --max-time 90 "$HEALTH_URL" || true)"
+          cat /tmp/health.json 2>/dev/null || true
+          if [ "$status" != "200" ]; then
+            echo "Health check failed with HTTP ${status:-unknown}."
+            exit 1
+          fi
+          echo "Health check passed."
