@@ -24,9 +24,38 @@ def available_outputs(filename: str) -> list[str]:
     return []
 
 
+def _validate_file_signature(data: bytes, ext: str) -> None:
+    """Reject files whose content clearly does not match the claimed extension."""
+    if not data:
+        raise ValueError("O arquivo está vazio.")
+
+    if ext == ".pdf":
+        if b"%PDF-" not in data[:1024]:
+            raise ValueError("O conteúdo enviado não parece ser um PDF válido.")
+    elif ext == ".docx":
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(BytesIO(data)) as archive:
+                if "[Content_Types].xml" not in archive.namelist() or "word/document.xml" not in archive.namelist():
+                    raise ValueError("O arquivo não parece ser um documento Word (.docx) válido.")
+                bad_member = archive.testzip()
+                if bad_member:
+                    raise ValueError("O documento Word está danificado.")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("O conteúdo enviado não parece ser um documento Word (.docx) válido.") from exc
+    elif ext in {".png", ".jpg", ".jpeg", ".webp"}:
+        try:
+            with Image.open(BytesIO(data)) as image:
+                image.verify()
+        except Exception as exc:
+            raise ValueError("O conteúdo enviado não parece ser uma imagem válida.") from exc
+
+
 def convert_file(data: bytes, filename: str, output_format: str) -> tuple[bytes, str, str]:
     ext = Path(filename).suffix.lower()
     stem = Path(filename).stem or "arquivo"
+    _validate_file_signature(data, ext)
 
     if ext == ".pdf":
         reader = PdfReader(BytesIO(data))
