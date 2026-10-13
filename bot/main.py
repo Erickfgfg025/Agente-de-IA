@@ -16,6 +16,7 @@ from bot.config import settings
 from bot.database import register_telegram_user
 from bot.documents import make_docx, make_pdf, safe_filename
 from bot.conversions import SUPPORTED_INPUTS, available_outputs, convert_file
+from bot.pdf_tools import extract_pdf_text, merge_pdfs, split_pdf_zip
 from bot.keyboards import main_menu
 
 
