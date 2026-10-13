@@ -36,10 +36,10 @@ def get_daily_usage(user_id: str) -> dict:
         .select("jobs_count,bytes_processed")
         .eq("user_id", user_id)
         .eq("usage_date", datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat())
-        .maybe_single()
         .execute()
     )
-    return response.data or {"jobs_count": 0, "bytes_processed": 0}
+    rows = response.data or []
+    return rows[0] if rows else {"jobs_count": 0, "bytes_processed": 0}
 
 
 def consume_daily_usage(telegram_user_id: int) -> dict:
