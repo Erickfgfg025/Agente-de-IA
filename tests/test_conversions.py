@@ -29,7 +29,7 @@ def text_pdf() -> bytes:
 
 def test_rejects_fake_pdf_named_txt_conversion():
     with pytest.raises(ValueError, match="não parece ser um PDF válido"):
-        convert_file(b"isto não é um PDF", "arquivo.pdf", "txt")
+        convert_file("isto não é um PDF".encode("utf-8"), "arquivo.pdf", "txt")
 
 
 def test_converts_txt_to_docx():
