@@ -66,8 +66,10 @@ async def cancel_command(message: Message, state: FSMContext) -> None:
     await message.answer("Operação cancelada. Use o menu para escolher outra ferramenta.", reply_markup=main_menu())
 
 
-@dp.callback_query(F.data == "menu:edit")
+@dp.callback_query(F.data.in_({"menu:edit", "menu:create", "menu:document", "menu:write"}))
 async def begin_document(callback: CallbackQuery, state: FSMContext) -> None:
+    logger.info("Document creation menu clicked: data=%s user=%s", callback.data, callback.from_user.id)
+    await state.clear()
     await state.set_state(CreateDocument.waiting_text)
     await callback.answer()
     if callback.message:
@@ -142,9 +144,21 @@ async def generate_document(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @dp.callback_query(F.data.startswith("menu:"))
-async def menu_action(callback: CallbackQuery) -> None:
+async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
     assert callback.data is not None
+    logger.info("Menu callback received: data=%s user=%s", callback.data, callback.from_user.id)
     action = callback.data.split(":", 1)[1]
+    if action in {"create", "document", "write"}:
+        await state.clear()
+        await state.set_state(CreateDocument.waiting_text)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "📝 <b>Criar documento</b>\n\nEnvie o texto que deseja colocar no arquivo.\n"
+                "Depois você escolhe Word ou PDF. Para cancelar, envie /cancelar.",
+                parse_mode="HTML",
+            )
+        return
     messages = {
         "convert": "🔄 <b>Converter arquivo</b>\n\nO próximo módulo será a conversão de arquivos enviados. Por enquanto, a criação de Word e PDF já está disponível.",
         "pdf": "📑 <b>Ferramentas de PDF</b>\n\nA criação de PDF já está disponível em Criar ou editar documento. Juntar, dividir e extrair texto serão adicionados nas próximas etapas.",
@@ -173,3 +187,10 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+@dp.callback_query()
+async def unknown_callback(callback: CallbackQuery) -> None:
+    logger.warning("Unhandled callback query: data=%r user=%s", callback.data, callback.from_user.id)
+    await callback.answer("Atualizei o menu. Envie /start e tente novamente.", show_alert=True)
