@@ -1,0 +1,1 @@
+"""DOCUMENTO PRONTO Telegram bot."""
