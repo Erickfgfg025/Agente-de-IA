@@ -336,7 +336,8 @@ async def pdf_tools_action(callback: CallbackQuery, state: FSMContext) -> None:
         try:
             result = await asyncio.to_thread(merge_pdfs, files)
             if callback.message:
-                await callback.message.answer_document(BufferedInputFile(result, filename="pdfs_unidos.pdf"))
+                await callback.message.answer_document(BufferedInputFile(result, filename="pdfs_unidos.pdf"), caption="✅ PDFs unidos com sucesso.")
+                await callback.message.answer("O que deseja fazer agora?", reply_markup=main_menu())
         except Exception as exc:
             logger.exception("Erro ao juntar PDFs")
             if callback.message:
@@ -425,7 +426,7 @@ async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
         return
     messages = {
         "convert": "🔄 <b>Converter arquivo</b>\n\nO próximo módulo será a conversão de arquivos enviados. Por enquanto, a criação de Word e PDF já está disponível.",
-        "pdf": "📑 <b>Ferramentas de PDF</b>\n\nA criação de PDF já está disponível em Criar ou editar documento. Juntar, dividir e extrair texto serão adicionados nas próximas etapas.",
+        "pdf": "📑 <b>Ferramentas de PDF</b>\n\nJunte vários PDFs, divida um PDF em páginas separadas ou extraia texto selecionável para TXT.",
         "usage": "📊 O painel de uso detalhado ainda será implementado.",
         "premium": "⭐ Nenhuma cobrança está ativa. Os planos serão definidos depois de medir custos e uso real.",
         "help": "Use Criar ou editar documento para gerar arquivos Word ou PDF a partir de texto. Envie /cancelar para interromper uma operação.",
