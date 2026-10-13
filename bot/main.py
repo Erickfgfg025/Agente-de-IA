@@ -360,7 +360,12 @@ async def receive_merge_pdf(message: Message, state: FSMContext) -> None:
         await message.answer("Limite de 10 PDFs por operação atingido.", reply_markup=merge_control_menu())
         return
     buf = BytesIO()
-    await message.bot.download(doc.file_id, destination=buf)
+    try:
+        await message.bot.download(doc.file_id, destination=buf)
+    except Exception:
+        logger.exception("Falha ao baixar PDF para junção")
+        await message.answer("Não consegui baixar esse PDF do Telegram. Tente enviá-lo novamente.")
+        return
     files.append((doc.file_name or f"arquivo_{len(files)+1}.pdf", buf.getvalue()))
     await state.update_data(merge_files=files)
     await message.answer(f"PDF recebido ({len(files)}/10). " + ("Envie mais PDFs ou finalize." if len(files) >= 2 else "Envie pelo menos mais um PDF."), reply_markup=merge_control_menu())
@@ -390,7 +395,8 @@ async def receive_single_pdf_tool(message: Message, state: FSMContext) -> None:
         else:
             await message.answer("Operação inválida. Abra novamente Ferramentas de PDF.")
             return
-        await message.answer_document(BufferedInputFile(result, filename=filename))
+        await message.answer_document(BufferedInputFile(result, filename=filename), caption="✅ PDF processado com sucesso.")
+        await message.answer("O que deseja fazer agora?", reply_markup=main_menu())
     except Exception as exc:
         logger.exception("Erro na ferramenta PDF")
         await message.answer(f"Não foi possível processar o PDF: {exc}")
