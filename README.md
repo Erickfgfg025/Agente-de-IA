@@ -6,10 +6,12 @@ Bot de Telegram para criar, converter, organizar e editar documentos e arquivos.
 - [x] Projeto Supabase criado na região de São Paulo.
 - [x] Esquema inicial do banco aplicado.
 - [x] Esqueleto do bot Telegram iniciado.
-- [ ] Configurar token do Telegram no ambiente de execução.
-- [ ] Conectar camada de dados ao Supabase.
-- [ ] Implementar conversores e testes.
-- [ ] Configurar deploy e monitoramento.
+- [x] Servidor webhook compatível com Render e endpoint de saúde.
+- [x] Blueprint inicial de deploy em `render.yaml`.
+- [ ] Renomear o repositório GitHub para `Documento-Pronto`.
+- [ ] Criar o serviço no Render e configurar os segredos.
+- [ ] Implementar conversores e testes funcionais.
+- [ ] Configurar monitoramento e alertas.
 
 ## Funcionalidades planejadas
 1. Conversões de documentos (DOCX, TXT, ODT, RTF e PDF, conforme compatibilidade).
@@ -24,15 +26,27 @@ Bot de Telegram para criar, converter, organizar e editar documentos e arquivos.
 ## Stack inicial
 - Python 3.11+
 - aiogram 3
+- aiohttp para o webhook do Telegram
 - Supabase/PostgreSQL para metadados e uso
 - LibreOffice headless, PyMuPDF/pypdf, python-docx e Pillow conforme cada conversor
+
+## Deploy no Render
+O arquivo `render.yaml` define um serviço Web gratuito e usa webhook do Telegram para que as atualizações recebidas possam acordar o serviço após suspensão. O plano gratuito pode suspender o serviço após um período sem tráfego; portanto, não há garantia de resposta instantânea ou disponibilidade contínua.
+
+1. Abra o Render e escolha **New + → Blueprint**.
+2. Conecte o repositório GitHub deste projeto e selecione `render.yaml`.
+3. Informe `TELEGRAM_BOT_TOKEN` e `SUPABASE_SERVICE_ROLE_KEY` quando solicitado.
+4. `SUPABASE_URL` já está definida no blueprint; `WEBHOOK_SECRET_TOKEN` será gerado pelo Render.
+5. Depois do deploy, confira o endpoint `/healthz` e teste `/start` no Telegram.
+
+Não publique nem compartilhe tokens ou chaves. A chave `service_role` deve existir somente nas variáveis privadas do ambiente do servidor.
 
 ## Desenvolvimento local
 1. Instale Python 3.11 ou superior.
 2. Crie e ative um ambiente virtual.
 3. Instale as dependências: `pip install -r requirements.txt`.
 4. Copie `.env.example` para `.env` e preencha as variáveis.
-5. Execute: `python -m bot.main`.
+5. Para execução local com long polling, execute: `python -m bot.main`.
 
 Nunca envie tokens, chaves privadas ou arquivos de usuários para o GitHub. Não armazene o conteúdo de arquivos no banco; guarde apenas metadados necessários e remova arquivos temporários após o prazo definido.
 
