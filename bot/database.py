@@ -1,3 +1,4 @@
+from datetime import date
 from functools import lru_cache
 
 from supabase import Client, create_client
@@ -28,8 +29,6 @@ def register_telegram_user(telegram_user_id: int) -> dict:
 
 
 def get_daily_usage(user_id: str) -> dict:
-    from datetime import date
-
     client = get_supabase()
     response = (
         client.table("usage_daily")
@@ -40,3 +39,24 @@ def get_daily_usage(user_id: str) -> dict:
         .execute()
     )
     return response.data or {"jobs_count": 0, "bytes_processed": 0}
+
+
+def consume_daily_usage(telegram_user_id: int) -> dict:
+    """Atomically consume one free daily operation; the database resets by date."""
+    client = get_supabase()
+    response = client.rpc(
+        "record_daily_usage",
+        {
+            "p_telegram_user_id": telegram_user_id,
+            "p_daily_limit": settings.free_daily_jobs,
+        },
+    ).execute()
+    if not response.data:
+        raise RuntimeError("Supabase não retornou o resultado do limite diário.")
+    result = response.data[0]
+    return {
+        "allowed": bool(result["allowed"]),
+        "jobs_count": int(result["jobs_count"]),
+        "daily_limit": int(result["daily_limit"]),
+        "resets_on": result["resets_on"],
+    }
