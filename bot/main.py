@@ -30,6 +30,8 @@ class CreateDocument(StatesGroup):
     waiting_format = State()
     waiting_file = State()
     waiting_conversion = State()
+    waiting_pdf_file = State()
+    waiting_merge_files = State()
 
 
 def format_menu() -> InlineKeyboardMarkup:
@@ -277,6 +279,125 @@ async def generate_document(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
 
 
+
+def pdf_tools_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📎 Juntar PDFs", callback_data="pdf:merge")],
+        [InlineKeyboardButton(text="✂️ Dividir PDF por página", callback_data="pdf:split")],
+        [InlineKeyboardButton(text="📝 Extrair texto do PDF", callback_data="pdf:extract")],
+        [InlineKeyboardButton(text="⬅️ Menu principal", callback_data="pdf:back")],
+    ])
+
+
+def merge_control_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Juntar arquivos enviados", callback_data="pdf:merge_finish")],
+        [InlineKeyboardButton(text="❌ Cancelar", callback_data="pdf:cancel")],
+    ])
+
+
+@dp.callback_query(F.data.startswith("pdf:"))
+async def pdf_tools_action(callback: CallbackQuery, state: FSMContext) -> None:
+    action = (callback.data or "").split(":", 1)[1]
+    await callback.answer()
+    if action in {"back", "cancel"}:
+        await state.clear()
+        if callback.message:
+            await callback.message.answer("Menu principal:", reply_markup=main_menu())
+        return
+    if action == "merge":
+        await state.clear()
+        await state.update_data(merge_files=[])
+        await state.set_state(CreateDocument.waiting_merge_files)
+        if callback.message:
+            await callback.message.answer(
+                "📎 <b>Juntar PDFs</b>\nEnvie pelo menos 2 arquivos PDF, um por vez. Máximo: 10 arquivos. Quando terminar, toque em “Juntar arquivos enviados”.",
+                parse_mode="HTML", reply_markup=merge_control_menu())
+        return
+    if action in {"split", "extract"}:
+        await state.clear()
+        await state.update_data(pdf_action=action)
+        await state.set_state(CreateDocument.waiting_pdf_file)
+        prompt = "✂️ Envie o PDF que deseja dividir em arquivos de uma página." if action == "split" else "📝 Envie o PDF do qual deseja extrair o texto selecionável."
+        if callback.message:
+            await callback.message.answer(prompt)
+        return
+    if action == "merge_finish":
+        if await state.get_state() != CreateDocument.waiting_merge_files.state:
+            if callback.message:
+                await callback.message.answer("Inicie a operação pelo menu Ferramentas de PDF.")
+            return
+        data = await state.get_data()
+        files = data.get("merge_files", [])
+        if len(files) < 2:
+            if callback.message:
+                await callback.message.answer("Envie pelo menos 2 PDFs antes de juntar.", reply_markup=merge_control_menu())
+            return
+        try:
+            result = await asyncio.to_thread(merge_pdfs, files)
+            if callback.message:
+                await callback.message.answer_document(BufferedInputFile(result, filename="pdfs_unidos.pdf"))
+        except Exception as exc:
+            logger.exception("Erro ao juntar PDFs")
+            if callback.message:
+                await callback.message.answer(f"Não foi possível juntar os PDFs: {exc}")
+        finally:
+            await state.clear()
+
+
+@dp.message(CreateDocument.waiting_merge_files)
+async def receive_merge_pdf(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    if not doc or not (doc.file_name or "").lower().endswith(".pdf"):
+        await message.answer("Envie um arquivo PDF como documento.", reply_markup=merge_control_menu())
+        return
+    if doc.file_size and doc.file_size > settings.max_upload_mb * 1024 * 1024:
+        await message.answer(f"Arquivo acima do limite de {settings.max_upload_mb} MB.")
+        return
+    data = await state.get_data()
+    files = data.get("merge_files", [])
+    if len(files) >= 10:
+        await message.answer("Limite de 10 PDFs por operação atingido.", reply_markup=merge_control_menu())
+        return
+    buf = BytesIO()
+    await message.bot.download(doc.file_id, destination=buf)
+    files.append((doc.file_name or f"arquivo_{len(files)+1}.pdf", buf.getvalue()))
+    await state.update_data(merge_files=files)
+    await message.answer(f"PDF recebido ({len(files)}/10). " + ("Envie mais PDFs ou finalize." if len(files) >= 2 else "Envie pelo menos mais um PDF."), reply_markup=merge_control_menu())
+
+
+@dp.message(CreateDocument.waiting_pdf_file)
+async def receive_single_pdf_tool(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    if not doc or not (doc.file_name or "").lower().endswith(".pdf"):
+        await message.answer("Envie um arquivo PDF como documento.")
+        return
+    if doc.file_size and doc.file_size > settings.max_upload_mb * 1024 * 1024:
+        await message.answer(f"Arquivo acima do limite de {settings.max_upload_mb} MB.")
+        return
+    data = await state.get_data()
+    action = data.get("pdf_action")
+    buf = BytesIO()
+    try:
+        await message.bot.download(doc.file_id, destination=buf)
+        raw = buf.getvalue()
+        if action == "extract":
+            result = await asyncio.to_thread(extract_pdf_text, raw)
+            filename = "texto_extraido.txt"
+        elif action == "split":
+            result = await asyncio.to_thread(split_pdf_zip, raw, doc.file_name or "documento.pdf")
+            filename = "pdf_dividido.zip"
+        else:
+            await message.answer("Operação inválida. Abra novamente Ferramentas de PDF.")
+            return
+        await message.answer_document(BufferedInputFile(result, filename=filename))
+    except Exception as exc:
+        logger.exception("Erro na ferramenta PDF")
+        await message.answer(f"Não foi possível processar o PDF: {exc}")
+    finally:
+        await state.clear()
+
+
 @dp.callback_query(F.data.startswith("menu:"))
 async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
     assert callback.data is not None
@@ -308,7 +429,7 @@ async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer(
             messages.get(action, "Opção não reconhecida."),
             parse_mode="HTML",
-            reply_markup=main_menu(),
+            reply_markup=pdf_tools_menu() if action == "pdf" else main_menu(),
         )
 
 
