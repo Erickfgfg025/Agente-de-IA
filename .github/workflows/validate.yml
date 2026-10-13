@@ -1,0 +1,36 @@
+name: Validate DOCUMENTO PRONTO
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check Python syntax
+        run: python -m compileall -q bot
+      - name: Smoke test menu and configuration
+        run: |
+          python - <<'PY'
+          from bot.config import settings
+          from bot.keyboards import main_menu
+          assert settings.max_upload_mb > 0
+          assert settings.free_daily_jobs > 0
+          menu = main_menu()
+          assert len(menu.inline_keyboard) >= 4
+          print("Smoke test OK")
+          PY
