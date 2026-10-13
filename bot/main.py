@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from io import BytesIO
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -13,6 +15,7 @@ from aiogram.types import (
 from bot.config import settings
 from bot.database import register_telegram_user
 from bot.documents import make_docx, make_pdf, safe_filename
+from bot.conversions import SUPPORTED_INPUTS, available_outputs, convert_file
 from bot.keyboards import main_menu
 
 
@@ -24,6 +27,8 @@ dp = Dispatcher()
 class CreateDocument(StatesGroup):
     waiting_text = State()
     waiting_format = State()
+    waiting_file = State()
+    waiting_conversion = State()
 
 
 def format_menu() -> InlineKeyboardMarkup:
@@ -64,6 +69,134 @@ async def help_command(message: Message) -> None:
 async def cancel_command(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Operação cancelada. Use o menu para escolher outra ferramenta.", reply_markup=main_menu())
+
+
+
+
+def conversion_menu(outputs: list[str]) -> InlineKeyboardMarkup:
+    labels = {
+        "pdf": "📕 PDF",
+        "docx": "📄 Word (.docx)",
+        "txt": "📝 Texto (.txt)",
+    }
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=labels[item], callback_data=f"convert:{item}")]
+        for item in outputs
+    ] + [[InlineKeyboardButton(text="❌ Cancelar", callback_data="convert:cancel")]])
+
+
+@dp.message(Command("converter"))
+async def conversion_command(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(CreateDocument.waiting_file)
+    await message.answer(
+        "🔄 <b>Conversor de arquivos</b>\n\n"
+        "Envie um arquivo PDF, Word (.docx), TXT ou uma imagem PNG/JPG/WEBP.\n"
+        "Tamanho máximo: " + str(settings.max_upload_mb) + " MB.\n"
+        "Para cancelar, envie /cancelar.",
+        parse_mode="HTML",
+    )
+
+
+async def begin_conversion(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(CreateDocument.waiting_file)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "🔄 <b>Converter arquivo</b>\n\n"
+            "Envie um arquivo PDF, Word (.docx), TXT ou uma imagem PNG/JPG/WEBP.\n"
+            f"Tamanho máximo: {settings.max_upload_mb} MB.\n"
+            "Para cancelar, envie /cancelar.",
+            parse_mode="HTML",
+        )
+
+
+@dp.message(CreateDocument.waiting_file)
+async def receive_conversion_file(message: Message, state: FSMContext) -> None:
+    uploaded = message.document
+    filename = uploaded.file_name if uploaded else ""
+    file_id = uploaded.file_id if uploaded else ""
+    if message.photo:
+        uploaded_photo = message.photo[-1]
+        filename = "imagem.jpg"
+        file_id = uploaded_photo.file_id
+
+    if not file_id:
+        await message.answer("Envie o arquivo como anexo, ou uma imagem. Para sair, use /cancelar.")
+        return
+
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_INPUTS:
+        await message.answer("Formato não suportado. Envie PDF, DOCX, TXT, PNG, JPG, JPEG ou WEBP.")
+        return
+
+    size = uploaded.file_size if uploaded else (message.photo[-1].file_size if message.photo else 0)
+    if size and size > settings.max_upload_mb * 1024 * 1024:
+        await message.answer(f"O arquivo excede o limite de {settings.max_upload_mb} MB.")
+        return
+
+    buffer = BytesIO()
+    try:
+        await message.bot.download(file_id, destination=buffer)
+        data = buffer.getvalue()
+    except Exception:
+        logger.exception("Failed to download uploaded conversion file")
+        await message.answer("Não consegui baixar esse arquivo do Telegram. Tente enviar novamente.")
+        return
+
+    outputs = available_outputs(filename)
+    if not outputs:
+        await message.answer("Ainda não existe conversão disponível para esse formato.")
+        return
+
+    await state.update_data(conversion_data=data, conversion_filename=filename)
+    await state.set_state(CreateDocument.waiting_conversion)
+    await message.answer(
+        f"📎 Arquivo recebido: <b>{filename}</b>\nEscolha o formato de saída:",
+        reply_markup=conversion_menu(outputs),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("convert:"))
+async def run_conversion(callback: CallbackQuery, state: FSMContext) -> None:
+    action = (callback.data or "").split(":", 1)[1]
+    if action == "cancel":
+        await state.clear()
+        await callback.answer("Conversão cancelada")
+        if callback.message:
+            await callback.message.answer("Operação cancelada.", reply_markup=main_menu())
+        return
+
+    if await state.get_state() != CreateDocument.waiting_conversion.state:
+        await callback.answer("Envie um arquivo pelo menu Converter arquivo primeiro.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    file_data = data.get("conversion_data")
+    filename = data.get("conversion_filename", "arquivo")
+    if not isinstance(file_data, bytes):
+        await state.clear()
+        await callback.answer("O arquivo expirou. Envie-o novamente.", show_alert=True)
+        return
+
+    await callback.answer("Convertendo arquivo…")
+    try:
+        content, output_name, mime_type = await asyncio.to_thread(convert_file, file_data, filename, action)
+        if callback.message:
+            await callback.message.answer_document(
+                BufferedInputFile(content, filename=output_name),
+                caption=f"✅ Conversão concluída: {output_name}",
+            )
+            await callback.message.answer("Arquivo convertido. O que deseja fazer agora?", reply_markup=main_menu())
+    except Exception as exc:
+        logger.exception("File conversion failed for %s to %s", filename, action)
+        detail = str(exc) if isinstance(exc, ValueError) else "O arquivo pode estar danificado ou usar recursos não compatíveis."
+        if callback.message:
+            await callback.message.answer(f"Não consegui converter esse arquivo. {detail}")
+    finally:
+        await state.clear()
 
 
 @dp.callback_query(F.data.in_({"menu:edit", "menu:create", "menu:document", "menu:write"}))
@@ -148,6 +281,9 @@ async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
     assert callback.data is not None
     logger.info("Menu callback received: data=%s user=%s", callback.data, callback.from_user.id)
     action = callback.data.split(":", 1)[1]
+    if action == "convert":
+        await begin_conversion(callback, state)
+        return
     if action in {"create", "document", "write"}:
         await state.clear()
         await state.set_state(CreateDocument.waiting_text)
