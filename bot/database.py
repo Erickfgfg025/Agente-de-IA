@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import datetime
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 from supabase import Client, create_client
 
@@ -34,7 +35,7 @@ def get_daily_usage(user_id: str) -> dict:
         client.table("usage_daily")
         .select("jobs_count,bytes_processed")
         .eq("user_id", user_id)
-        .eq("usage_date", date.today().isoformat())
+        .eq("usage_date", datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat())
         .maybe_single()
         .execute()
     )
