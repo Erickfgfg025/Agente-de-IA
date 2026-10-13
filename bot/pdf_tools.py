@@ -5,6 +5,8 @@ from pypdf import PdfReader, PdfWriter
 
 def extract_pdf_text(data: bytes) -> bytes:
     reader = PdfReader(BytesIO(data))
+    if reader.is_encrypted:
+        raise ValueError("Este PDF está protegido por senha.")
     text = "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
     if not text:
         raise ValueError("Não foi encontrado texto selecionável neste PDF.")
