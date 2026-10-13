@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 
 from bot.config import settings
-from bot.database import register_telegram_user
+from bot.database import consume_daily_usage, get_daily_usage, register_telegram_user
 from bot.documents import make_docx, make_pdf, safe_filename
 from bot.conversions import SUPPORTED_INPUTS, available_outputs, convert_file
 from bot.pdf_tools import extract_pdf_text, merge_pdfs, split_pdf_zip
@@ -23,6 +23,46 @@ from bot.keyboards import main_menu
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger("documento_pronto")
 dp = Dispatcher()
+
+
+async def consume_quota(telegram_user_id: int, reply_target) -> bool:
+    """Consume one operation or explain why processing cannot continue."""
+    try:
+        result = await asyncio.to_thread(consume_daily_usage, telegram_user_id)
+    except Exception:
+        logger.exception("Could not check daily quota in Supabase")
+        await reply_target.answer("⚠️ Não consegui verificar seu limite agora. Tente novamente em instantes.")
+        return False
+    if not result["allowed"]:
+        await reply_target.answer(
+            "⏳ <b>Limite diário atingido</b>\n\n"
+            f"Você usou {result['jobs_count']}/{result['daily_limit']} operações gratuitas hoje.\n"
+            "O limite será renovado automaticamente amanhã.",
+            parse_mode="HTML",
+        )
+        return False
+    return True
+
+
+async def send_usage(telegram_user_id: int, reply_target) -> None:
+    try:
+        user = await asyncio.to_thread(register_telegram_user, telegram_user_id)
+        usage = await asyncio.to_thread(get_daily_usage, user["id"])
+        count = int(usage.get("jobs_count", 0))
+        limit = settings.free_daily_jobs
+        remaining = max(0, limit - count)
+        await reply_target.answer(
+            "📊 <b>Seu uso diário</b>\n\n"
+            "Plano: Gratuito 🆓\n"
+            f"Operações usadas: {count}/{limit}\n"
+            f"Restantes hoje: {remaining}\n\n"
+            "🔄 O limite renova automaticamente à meia-noite.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("Could not read daily usage from Supabase")
+        await reply_target.answer("Não consegui consultar seu uso agora. Tente novamente em instantes.")
+
 
 
 class CreateDocument(StatesGroup):
@@ -58,6 +98,12 @@ async def start(message: Message, state: FSMContext) -> None:
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
+
+
+@dp.message(Command("uso"))
+async def usage_command(message: Message) -> None:
+    if message.from_user:
+        await send_usage(message.from_user.id, message)
 
 
 @dp.message(Command("ajuda", "help"))
@@ -184,6 +230,11 @@ async def run_conversion(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("O arquivo expirou. Envie-o novamente.", show_alert=True)
         return
 
+    if not await consume_quota(callback.from_user.id, callback.message):
+        await state.clear()
+        await callback.answer()
+        return
+
     await callback.answer("Convertendo arquivo…")
     try:
         content, output_name, mime_type = await asyncio.to_thread(convert_file, file_data, filename, action)
@@ -251,6 +302,11 @@ async def generate_document(callback: CallbackQuery, state: FSMContext) -> None:
     if not text:
         await state.clear()
         await callback.answer("O texto não foi encontrado. Comece novamente.", show_alert=True)
+        return
+
+    if not await consume_quota(callback.from_user.id, callback.message):
+        await state.clear()
+        await callback.answer()
         return
 
     await callback.answer("Preparando arquivo…")
@@ -333,6 +389,9 @@ async def pdf_tools_action(callback: CallbackQuery, state: FSMContext) -> None:
             if callback.message:
                 await callback.message.answer("Envie pelo menos 2 PDFs antes de juntar.", reply_markup=merge_control_menu())
             return
+        if not await consume_quota(callback.from_user.id, callback.message):
+            await state.clear()
+            return
         try:
             result = await asyncio.to_thread(merge_pdfs, files)
             if callback.message:
@@ -383,6 +442,13 @@ async def receive_single_pdf_tool(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     action = data.get("pdf_action")
+    if action not in {"extract", "split"}:
+        await state.clear()
+        await message.answer("Operação inválida. Abra novamente Ferramentas de PDF.")
+        return
+    if not message.from_user or not await consume_quota(message.from_user.id, message):
+        await state.clear()
+        return
     buf = BytesIO()
     try:
         await message.bot.download(doc.file_id, destination=buf)
@@ -424,10 +490,14 @@ async def menu_action(callback: CallbackQuery, state: FSMContext) -> None:
                 parse_mode="HTML",
             )
         return
+    if action == "usage":
+        if callback.message:
+            await send_usage(callback.from_user.id, callback.message)
+        return
     messages = {
         "convert": "🔄 <b>Converter arquivo</b>\n\nO próximo módulo será a conversão de arquivos enviados. Por enquanto, a criação de Word e PDF já está disponível.",
         "pdf": "📑 <b>Ferramentas de PDF</b>\n\nJunte vários PDFs, divida um PDF em páginas separadas ou extraia texto selecionável para TXT.",
-        "usage": "📊 O painel de uso detalhado ainda será implementado.",
+        "usage": "📊 Consulte seu uso diário.",
         "premium": "⭐ Nenhuma cobrança está ativa. Os planos serão definidos depois de medir custos e uso real.",
         "help": "Use Criar ou editar documento para gerar arquivos Word ou PDF a partir de texto. Envie /cancelar para interromper uma operação.",
     }
